@@ -36,7 +36,7 @@ type inflight_calib = {
 
 type rc_status = string
 type rc_mode = string
-type fbw = { mutable rc_status : rc_status; mutable rc_mode : rc_mode; mutable rc_rate : int; mutable pprz_mode_msgs_since_last_fbw_status_msg : int; }
+type fbw = { mutable fbw_bat : float; mutable rc_status : rc_status; mutable rc_mode : rc_mode; mutable rc_rate : int; mutable pprz_mode_msgs_since_last_fbw_status_msg : int; }
 val gps_nb_channels : int
 type svinfo = {
     svid : int;
@@ -48,6 +48,24 @@ type svinfo = {
     mutable age : int
   }
 val svinfo_init : unit -> svinfo
+
+type datalink_status = {
+    mutable uplink_lost_time : int;
+    mutable uplink_msgs : int;
+    mutable downlink_msgs : int;
+    mutable downlink_rate : int;
+ }
+type link_status = {
+    rx_lost_time : int;
+    rx_bytes : int;
+    rx_msgs : int;
+    rx_bytes_rate : float;
+    tx_msgs : int;
+    ping_time : float
+ }
+val datalink_status_init : unit -> datalink_status
+val link_status_init : unit -> link_status
+
 type horiz_mode =
     Circle of Latlong.geographic * int
   | Segment of Latlong.geographic * Latlong.geographic
@@ -75,7 +93,7 @@ type aircraft = {
     airframe : Xml.xml;
     mutable pos : Latlong.geographic;
     mutable unix_time : float;
-    mutable itow : int32;
+    mutable itow : int64;
     mutable roll : float;
     mutable pitch : float;
     mutable heading : float; (* rad *)
@@ -118,14 +136,18 @@ type aircraft = {
     mutable stage_time : int;
     mutable block_time : int;
     mutable horiz_mode : horiz_mode;
-    dl_setting_values : float array;
+    dl_setting_values : float option array;
     mutable nb_dl_setting_values : int;
     mutable survey : (Latlong.geographic * Latlong.geographic) option;
+    datalink_status : datalink_status;
+    link_status : (int, link_status) Hashtbl.t;
     mutable last_msg_date : float;
     mutable time_since_last_survey_msg : float;
     mutable dist_to_wp : float;
-    inflight_calib : inflight_calib
+    inflight_calib : inflight_calib;
+    mutable ap_modes : string array option
 }
 
 val new_aircraft : string -> string -> Xml.xml -> Xml.xml -> aircraft
 val max_nb_dl_setting_values : int
+val modes_of_aircraft : aircraft -> string array

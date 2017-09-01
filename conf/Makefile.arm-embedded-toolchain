@@ -25,11 +25,14 @@ else
   TOOLCHAIN_FOUND = 1
 endif
 ifneq ($(TOOLCHAIN_FOUND),1)
-  $(error Error: arm-none-eabi-gcc cross-compiler not found! Recommended toolchain is https://launchpad.net/gcc-arm-embedded)
+  ifneq ($(MAKECMDGOALS),clean)
+    $(error Error: arm-none-eabi-gcc cross-compiler not found! Recommended toolchain is https://launchpad.net/gcc-arm-embedded)
+  endif
 endif
 
 CC   = $(PREFIX)-gcc
-LD   = $(PREFIX)-gcc
+CXX  = $(PREFIX)-g++
+LD   = $(PREFIX)-g++
 AR   = $(PREFIX)-ar
 CP   = $(PREFIX)-objcopy
 DMP  = $(PREFIX)-objdump

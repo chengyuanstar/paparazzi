@@ -82,8 +82,9 @@ void hmc58xx_init(struct Hmc58xx *hmc, struct i2c_periph *i2c_p, uint8_t addr)
   /* set default config options */
   hmc58xx_set_default_config(&(hmc->config));
   hmc->type = HMC_TYPE_5883;
-  hmc->initialized = FALSE;
+  hmc->initialized = false;
   hmc->init_status = HMC_CONF_UNINIT;
+  hmc->adc_overflow_cnt = 0;
 }
 
 static void hmc58xx_i2c_tx_reg(struct Hmc58xx *hmc, uint8_t reg, uint8_t val)
@@ -101,7 +102,7 @@ static void hmc58xx_send_config(struct Hmc58xx *hmc)
 {
   switch (hmc->init_status) {
     case HMC_CONF_CRA:
-      hmc58xx_i2c_tx_reg(hmc, HMC58XX_REG_CFGA, (hmc->config.rate<<2)|(hmc->config.meas));
+      hmc58xx_i2c_tx_reg(hmc, HMC58XX_REG_CFGA, (hmc->config.rate << 2) | (hmc->config.meas));
       hmc->init_status++;
       break;
     case HMC_CONF_CRB:
@@ -113,7 +114,7 @@ static void hmc58xx_send_config(struct Hmc58xx *hmc)
       hmc->init_status++;
       break;
     case HMC_CONF_DONE:
-      hmc->initialized = TRUE;
+      hmc->initialized = true;
       hmc->i2c_trans.status = I2CTransDone;
       break;
     default:
@@ -137,7 +138,7 @@ void hmc58xx_start_configure(struct Hmc58xx *hmc)
 // Normal reading
 void hmc58xx_read(struct Hmc58xx *hmc)
 {
-  if (hmc->initialized && hmc->i2c_trans.status == I2CTransDone){
+  if (hmc->initialized && hmc->i2c_trans.status == I2CTransDone) {
     hmc->i2c_trans.buf[0] = HMC58XX_REG_DATXM;
     hmc->i2c_trans.type = I2CTransTxRx;
     hmc->i2c_trans.len_r = 6;
@@ -153,24 +154,29 @@ void hmc58xx_event(struct Hmc58xx *hmc)
   if (hmc->initialized) {
     if (hmc->i2c_trans.status == I2CTransFailed) {
       hmc->i2c_trans.status = I2CTransDone;
-    }
-    else if (hmc->i2c_trans.status == I2CTransSuccess) {
+    } else if (hmc->i2c_trans.status == I2CTransSuccess) {
       if (hmc->type == HMC_TYPE_5843) {
-        hmc->data.vect.x = Int16FromBuf(hmc->i2c_trans.buf,0);
-        hmc->data.vect.y = Int16FromBuf(hmc->i2c_trans.buf,2);
-        hmc->data.vect.z = Int16FromBuf(hmc->i2c_trans.buf,4);
+        hmc->data.vect.x = Int16FromBuf(hmc->i2c_trans.buf, 0);
+        hmc->data.vect.y = Int16FromBuf(hmc->i2c_trans.buf, 2);
+        hmc->data.vect.z = Int16FromBuf(hmc->i2c_trans.buf, 4);
       }
       /* HMC5883 has xzy order of axes in returned data */
       else {
-        hmc->data.vect.x = Int16FromBuf(hmc->i2c_trans.buf,0);
-        hmc->data.vect.y = Int16FromBuf(hmc->i2c_trans.buf,4);
-        hmc->data.vect.z = Int16FromBuf(hmc->i2c_trans.buf,2);
+        hmc->data.vect.x = Int16FromBuf(hmc->i2c_trans.buf, 0);
+        hmc->data.vect.y = Int16FromBuf(hmc->i2c_trans.buf, 4);
+        hmc->data.vect.z = Int16FromBuf(hmc->i2c_trans.buf, 2);
       }
-      hmc->data_available = TRUE;
+      /* only set available if measurements valid: -4096 if ADC under/overflow in sensor */
+      if (hmc->data.vect.x != -4096 && hmc->data.vect.y != -4096 &&
+          hmc->data.vect.z != -4096) {
+        hmc->data_available = true;
+      }
+      else {
+        hmc->adc_overflow_cnt++;
+      }
       hmc->i2c_trans.status = I2CTransDone;
     }
-  }
-  else if (hmc->init_status != HMC_CONF_UNINIT) { // Configuring but not yet initialized
+  } else if (hmc->init_status != HMC_CONF_UNINIT) { // Configuring but not yet initialized
     if (hmc->i2c_trans.status == I2CTransSuccess || hmc->i2c_trans.status == I2CTransDone) {
       hmc->i2c_trans.status = I2CTransDone;
       hmc58xx_send_config(hmc);

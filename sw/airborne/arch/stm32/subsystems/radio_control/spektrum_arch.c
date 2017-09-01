@@ -35,6 +35,11 @@
 // for timer_get_frequency
 #include "mcu_arch.h"
 
+INFO("Radio-Control now follows PPRZ sign convention: this means you might need to reverese some channels in your transmitter: RollRight / PitchUp / YawRight / FullThrottle / Auto2 are positive deflections")
+
+// for Min macro
+#include "std.h"
+
 #include BOARD_CONFIG
 
 #define SPEKTRUM_CHANNELS_PER_FRAME 7
@@ -44,21 +49,67 @@
 #define ONE_MHZ 1000000
 
 /* Number of low pulses sent to satellite receivers */
+#if USE_DSMX
+#define MASTER_RECEIVER_PULSES 9
+#define SLAVE_RECEIVER_PULSES 10
+#else
 #define MASTER_RECEIVER_PULSES 5
 #define SLAVE_RECEIVER_PULSES 6
+#endif
 
 #define TIM_TICS_FOR_100us 100
 #define MIN_FRAME_SPACE  70  // 7ms
 #define MAX_BYTE_SPACE  3   // .3ms
 
+
+//not all f1's have a timer 6, so, some redefines have to happen
+#define PASTER3(x,y,z) x  ## y ## z
+#define EVALUATOR3(x,y,z)  PASTER3(x,y,z)
+#define NVIC_TIMx_IRQ EVALUATOR3(NVIC_TIM, SPEKTRUM_TIMER,_IRQ)
+#define NVIC_TIMx_DAC_IRQ EVALUATOR3(NVIC_TIM, SPEKTRUM_TIMER,_DAC_IRQ) // not really necessary, only for f4 which probably always has a timer 4
+#define TIMx_ISR EVALUATOR3(tim, SPEKTRUM_TIMER,_isr)
+#define TIMx_DAC_ISR EVALUATOR3(tim, SPEKTRUM_TIMER,_dac_isr)
+
+#define PASTER2(x,y) x  ## y
+#define EVALUATOR2(x,y)  PASTER2(x,y)
+#define TIMx EVALUATOR2(TIM, SPEKTRUM_TIMER)
+#define RCC_TIMx EVALUATOR2(RCC_TIM, SPEKTRUM_TIMER)
+
+#ifndef SPEKTRUM_TIMER
+#define SPEKTRUM_TIMER 6
+#endif
+
+#if (SPEKTRUM_TIMER == 6)
 #ifndef NVIC_TIM6_IRQ_PRIO
 #define NVIC_TIM6_IRQ_PRIO 2
+#define NVIC_TIMx_IRQ_PRIO 2
+#else
+#define NVIC_TIMx_IRQ_PRIO NVIC_TIM6_IRQ_PRIO
 #endif
-
 #ifndef NVIC_TIM6_DAC_IRQ_PRIO
 #define NVIC_TIM6_DAC_IRQ_PRIO 2
+#define NVIC_TIMx_DAC_IRQ_PRIO 2
+#else
+#define NVIC_TIMx_DAC_IRQ_PRIO NVIC_TIM6_DAC_IRQ_PRIO
+#endif
 #endif
 
+#if (SPEKTRUM_TIMER == 3)
+#ifndef NVIC_TIM3_IRQ_PRIO
+#define NVIC_TIM3_IRQ_PRIO 2
+#define NVIC_TIMx_IRQ_PRIO 2
+#else
+#define NVIC_TIMx_IRQ_PRIO NVIC_TIM6_IRQ_PRIO
+#endif
+#ifndef NVIC_TIM3_DAC_IRQ_PRIO
+#define NVIC_TIM3_DAC_IRQ_PRIO 2
+#define NVIC_TIMx_DAC_IRQ_PRIO 2
+#else
+#define NVIC_TIMx_DAC_IRQ_PRIO NVIC_TIM6_DAC_IRQ_PRIO
+#endif
+#endif
+
+PRINT_CONFIG_MSG_VALUE("SPEKTRUM_TIMER: " , SPEKTRUM_TIMER)
 
 #ifdef NVIC_UART_IRQ_PRIO
 #define NVIC_PRIMARY_UART_PRIO NVIC_UART_IRQ_PRIO
@@ -82,32 +133,32 @@
 #define SecondaryUart(_x) _SecondaryUart(RADIO_CONTROL_SPEKTRUM_SECONDARY_PORT, _x)
 
 struct SpektrumStateStruct {
-    uint8_t ReSync;
-    uint8_t SpektrumTimer;
-    uint8_t Sync;
-    uint8_t ChannelCnt;
-    uint8_t FrameCnt;
-    uint8_t HighByte;
-    uint8_t SecondFrame;
-    uint16_t LostFrameCnt;
-    uint8_t RcAvailable;
-    int16_t values[SPEKTRUM_CHANNELS_PER_FRAME*MAX_SPEKTRUM_FRAMES];
+  uint8_t ReSync;
+  uint8_t SpektrumTimer;
+  uint8_t Sync;
+  uint8_t ChannelCnt;
+  uint8_t FrameCnt;
+  uint8_t HighByte;
+  uint8_t SecondFrame;
+  uint16_t LostFrameCnt;
+  uint8_t RcAvailable;
+  int16_t values[SPEKTRUM_CHANNELS_PER_FRAME *MAX_SPEKTRUM_FRAMES];
 };
 
 typedef struct SpektrumStateStruct SpektrumStateType;
 
-SpektrumStateType PrimarySpektrumState = {1,0,0,0,0,0,0,0,0,{0}};
+SpektrumStateType PrimarySpektrumState = {1, 0, 0, 0, 0, 0, 0, 0, 0, {0}};
 PRINT_CONFIG_VAR(RADIO_CONTROL_SPEKTRUM_PRIMARY_PORT)
 
 #ifdef RADIO_CONTROL_SPEKTRUM_SECONDARY_PORT
 PRINT_CONFIG_MSG("Using secondary spektrum receiver.")
 PRINT_CONFIG_VAR(RADIO_CONTROL_SPEKTRUM_SECONDARY_PORT)
-SpektrumStateType SecondarySpektrumState = {1,0,0,0,0,0,0,0,0,{0}};
+SpektrumStateType SecondarySpektrumState = {1, 0, 0, 0, 0, 0, 0, 0, 0, {0}};
 #else
 PRINT_CONFIG_MSG("NOT using secondary spektrum receiver.")
 #endif
 
-int16_t SpektrumBuf[SPEKTRUM_CHANNELS_PER_FRAME*MAX_SPEKTRUM_FRAMES];
+int16_t SpektrumBuf[SPEKTRUM_CHANNELS_PER_FRAME *MAX_SPEKTRUM_FRAMES];
 /* the order of the channels on a spektrum is always as follows :
  *
  * Throttle   0
@@ -131,12 +182,9 @@ int8_t SpektrumSigns[] = RADIO_CONTROL_SPEKTRUM_SIGNS;
 /* Parser state variables */
 static uint8_t EncodingType = 0;
 static uint8_t ExpectedFrames = 0;
-/* initialise the uarts used by the parser */
-void SpektrumUartInit(void);
+
 /* initialise the timer used by the parser to ensure sync */
 void SpektrumTimerInit(void);
-
-void tim6_irq_handler(void);
 
 /** Set polarity using RC_POLARITY_GPIO.
  * SBUS signal has a reversed polarity compared to normal UART
@@ -150,12 +198,13 @@ void tim6_irq_handler(void);
 #define RC_SET_POLARITY gpio_clear
 #endif
 
- /*****************************************************************************
- *
- * Initialise the timer an uarts used by the Spektrum receiver subsystem
- *
- *****************************************************************************/
-void radio_control_impl_init(void) {
+/*****************************************************************************
+*
+* Initialise the timer an uarts used by the Spektrum receiver subsystem
+*
+*****************************************************************************/
+void radio_control_impl_init(void)
+{
 
   PrimarySpektrumState.ReSync = 1;
 
@@ -274,25 +323,28 @@ void radio_control_impl_init(void) {
  * 100% transmitter-travel
  *****************************************************************************/
 
- /*****************************************************************************
- *
- * Spektrum Parser captures frame data by using time between frames to sync on
- *
- *****************************************************************************/
+/*****************************************************************************
+*
+* Spektrum Parser captures frame data by using time between frames to sync on
+*
+*****************************************************************************/
 
-static inline void SpektrumParser(uint8_t _c, SpektrumStateType* spektrum_state, bool_t secondary_receiver)  {
+static inline void SpektrumParser(uint8_t _c, SpektrumStateType *spektrum_state, bool secondary_receiver)
+{
+
+
 
   uint16_t ChannelData;
   uint8_t TimedOut;
   static uint8_t TmpEncType = 0;        /* 0 = 10bit, 1 = 11 bit        */
   static uint8_t TmpExpFrames = 0;      /* # of frames for channel data */
 
-   TimedOut = (!spektrum_state->SpektrumTimer) ? 1 : 0;
+  TimedOut = (!spektrum_state->SpektrumTimer) ? 1 : 0;
 
   /* If we have just started the resync process or */
   /* if we have recieved a character before our    */
   /* 7ms wait has finished                         */
-  if ((spektrum_state->ReSync == 1) ||
+  if ((spektrum_state->ReSync == 1)  ||
       ((spektrum_state->Sync == 0) && (!TimedOut))) {
 
     spektrum_state->ReSync = 0;
@@ -303,23 +355,25 @@ static inline void SpektrumParser(uint8_t _c, SpektrumStateType* spektrum_state,
     spektrum_state->SecondFrame = 0;
     return;
   }
+//LED_OFF(1);
 
   /* the first byte of a new frame. It was received */
   /* more than 7ms after the last received byte.    */
   /* It represents the number of lost frames so far.*/
   if (spektrum_state->Sync == 0) {
-      spektrum_state->LostFrameCnt = _c;
-      if(secondary_receiver) /* secondary receiver */
-        spektrum_state->LostFrameCnt = spektrum_state->LostFrameCnt << 8;
-      spektrum_state->Sync = 1;
-      spektrum_state->SpektrumTimer = MAX_BYTE_SPACE;
-      return;
+    spektrum_state->LostFrameCnt = _c;
+    if (secondary_receiver) { /* secondary receiver */
+      spektrum_state->LostFrameCnt = spektrum_state->LostFrameCnt << 8;
+    }
+    spektrum_state->Sync = 1;
+    spektrum_state->SpektrumTimer = MAX_BYTE_SPACE;
+    return;
   }
 
   /* all other bytes should be recieved within     */
   /* MAX_BYTE_SPACE time of the last byte received */
   /* otherwise something went wrong resynchronise  */
-  if(TimedOut) {
+  if (TimedOut) {
     spektrum_state->ReSync = 1;
     /* next frame not expected sooner than 7ms     */
     spektrum_state->SpektrumTimer = MIN_FRAME_SPACE;
@@ -328,16 +382,16 @@ static inline void SpektrumParser(uint8_t _c, SpektrumStateType* spektrum_state,
 
   /* second character determines resolution and frame rate for main */
   /* receiver or low byte of LostFrameCount for secondary receiver  */
-  if(spektrum_state->Sync == 1) {
-    if(secondary_receiver) {
-      spektrum_state->LostFrameCnt +=_c;
+  if (spektrum_state->Sync == 1) {
+    if (secondary_receiver) {
+      spektrum_state->LostFrameCnt += _c;
       TmpExpFrames = ExpectedFrames;
     } else {
       /** @todo collect more data. I suspect that there is a low res       */
       /* protocol that is still 10 bit but without using the full range.    */
-      TmpEncType =(_c & 0x10)>>4;      /* 0 = 10bit, 1 = 11 bit             */
+      TmpEncType = (_c & 0x10) >> 4;   /* 0 = 10bit, 1 = 11 bit             */
       TmpExpFrames = _c & 0x03;        /* 1 = 1 frame contains all channels */
-                                       /* 2 = 2 channel data in 2 frames    */
+      /* 2 = 2 channel data in 2 frames    */
     }
     spektrum_state->Sync = 2;
     spektrum_state->SpektrumTimer = MAX_BYTE_SPACE;
@@ -347,7 +401,7 @@ static inline void SpektrumParser(uint8_t _c, SpektrumStateType* spektrum_state,
   /* high byte of channel data if this is the first byte */
   /* of channel data and the most significant bit is set */
   /* then this is the second frame of channel data.      */
-  if(spektrum_state->Sync == 2) {
+  if (spektrum_state->Sync == 2) {
     spektrum_state->HighByte = _c;
     if (spektrum_state->ChannelCnt == 0) {
       spektrum_state->SecondFrame = (spektrum_state->HighByte & 0x80) ? 1 : 0;
@@ -358,28 +412,27 @@ static inline void SpektrumParser(uint8_t _c, SpektrumStateType* spektrum_state,
   }
 
   /* low byte of channel data */
-  if(spektrum_state->Sync == 3) {
+  if (spektrum_state->Sync == 3) {
     spektrum_state->Sync = 2;
     spektrum_state->SpektrumTimer = MAX_BYTE_SPACE;
     /* we overwrite the buffer now so rc data is not available now */
     spektrum_state->RcAvailable = 0;
     ChannelData = ((uint16_t)spektrum_state->HighByte << 8) | _c;
     spektrum_state->values[spektrum_state->ChannelCnt
-                          + (spektrum_state->SecondFrame * 7)] = ChannelData;
+                           + (spektrum_state->SecondFrame * 7)] = ChannelData;
     spektrum_state->ChannelCnt ++;
   }
 
   /* If we have a whole frame */
-  if(spektrum_state->ChannelCnt >= SPEKTRUM_CHANNELS_PER_FRAME) {
+  if (spektrum_state->ChannelCnt >= SPEKTRUM_CHANNELS_PER_FRAME) {
     /* how many frames did we expect ? */
     ++spektrum_state->FrameCnt;
-    if (spektrum_state->FrameCnt == TmpExpFrames)
-    {
+    if (spektrum_state->FrameCnt == TmpExpFrames) {
       /* set the rc_available_flag */
       spektrum_state->RcAvailable = 1;
       spektrum_state->FrameCnt = 0;
     }
-    if(!secondary_receiver) { /* main receiver */
+    if (!secondary_receiver) { /* main receiver */
       EncodingType = TmpEncType;         /* only update on a good */
       ExpectedFrames = TmpExpFrames;     /* main receiver frame   */
     }
@@ -397,7 +450,8 @@ static inline void SpektrumParser(uint8_t _c, SpektrumStateType* spektrum_state,
  *
  *****************************************************************************/
 
-void RadioControlEventImp(void (*frame_handler)(void)) {
+void RadioControlEventImp(void (*frame_handler)(void))
+{
   uint8_t ChannelCnt;
   uint8_t ChannelNum;
   uint16_t ChannelData;
@@ -424,40 +478,40 @@ void RadioControlEventImp(void (*frame_handler)(void)) {
 
 #else
   /* if we have one receiver and it has new data */
-  if(PrimarySpektrumState.RcAvailable) {
+  if (PrimarySpektrumState.RcAvailable) {
     PrimarySpektrumState.RcAvailable = 0;
 #endif
     ChannelCnt = 0;
     /* for every piece of channel data we have received */
-    for(int i = 0; (i < SPEKTRUM_CHANNELS_PER_FRAME * ExpectedFrames); i++) {
+    for (int i = 0; (i < SPEKTRUM_CHANNELS_PER_FRAME * ExpectedFrames); i++) {
 #ifndef RADIO_CONTROL_SPEKTRUM_SECONDARY_PORT
       ChannelData = PrimarySpektrumState.values[i];
 #else
       ChannelData = (!BestReceiver) ? PrimarySpektrumState.values[i] :
-                                 SecondarySpektrumState.values[i];
+                    SecondarySpektrumState.values[i];
 #endif
       /* find out the channel number and its value by  */
       /* using the EncodingType which is only received */
       /* from the main receiver                        */
-      switch(EncodingType) {
-        case(0) : /* 10 bit */
+      switch (EncodingType) {
+        case (0) : /* 10 bit */
           ChannelNum = (ChannelData >> 10) & 0x0f;
           /* don't bother decoding unused channels */
-          if (ChannelNum < RADIO_CONTROL_NB_CHANNEL) {
-           SpektrumBuf[ChannelNum] = ChannelData & 0x3ff;
-           SpektrumBuf[ChannelNum] -= 0x200;
-           SpektrumBuf[ChannelNum] *= MAX_PPRZ/0x156;
-           ChannelCnt++;
+          if (ChannelNum < SPEKTRUM_NB_CHANNEL) {
+            SpektrumBuf[ChannelNum] = ChannelData & 0x3ff;
+            SpektrumBuf[ChannelNum] -= 0x200;
+            SpektrumBuf[ChannelNum] *= MAX_PPRZ / 0x156;
+            ChannelCnt++;
           }
           break;
 
-        case(1) : /* 11 bit */
+        case (1) : /* 11 bit */
           ChannelNum = (ChannelData >> 11) & 0x0f;
           /* don't bother decoding unused channels */
-          if (ChannelNum < RADIO_CONTROL_NB_CHANNEL) {
+          if (ChannelNum < SPEKTRUM_NB_CHANNEL) {
             SpektrumBuf[ChannelNum] = ChannelData & 0x7ff;
             SpektrumBuf[ChannelNum] -= 0x400;
-            SpektrumBuf[ChannelNum] *= MAX_PPRZ/0x2AC;
+            SpektrumBuf[ChannelNum] *= MAX_PPRZ / 0x2AC;
             ChannelCnt++;
           }
           break;
@@ -465,8 +519,9 @@ void RadioControlEventImp(void (*frame_handler)(void)) {
         default : ChannelNum = 0x0F; break;  /* never going to get here */
       }
       /* store the value of the highest valid channel */
-      if ((ChannelNum != 0x0F) && (ChannelNum > MaxChannelNum))
+      if ((ChannelNum != 0x0F) && (ChannelNum > MaxChannelNum)) {
         MaxChannelNum = ChannelNum;
+      }
 
     }
 
@@ -475,9 +530,14 @@ void RadioControlEventImp(void (*frame_handler)(void)) {
       radio_control.frame_cpt++;
       radio_control.time_since_last_frame = 0;
       radio_control.status = RC_OK;
-      for (int i = 0; i < (MaxChannelNum + 1); i++) {
+      /* since it is possible for the user use less than the actually available channels,
+       * we only transfer only Min(RADIO_CONTROL_NB_CHANNEL, available_channels)
+       */
+      for (int i = 0; i < Min(RADIO_CONTROL_NB_CHANNEL, (MaxChannelNum + 1)); i++) {
         radio_control.values[i] = SpektrumBuf[i];
-        if (i == RADIO_THROTTLE ) {
+        //Only values between +-MAX_PPRZ are allowed
+        Bound(radio_control.values[i], -MAX_PPRZ, MAX_PPRZ);
+        if (i == RADIO_THROTTLE) {
           radio_control.values[i] += MAX_PPRZ;
           radio_control.values[i] /= 2;
         }
@@ -491,59 +551,64 @@ void RadioControlEventImp(void (*frame_handler)(void)) {
 
 /*****************************************************************************
  *
- * Initialise TIM6 to fire an interrupt every 100 microseconds to provide
+ * Initialise TIMx to fire an interrupt every 100 microseconds to provide
  * timebase for SpektrumParser
  *
  *****************************************************************************/
-void SpektrumTimerInit( void ) {
+void SpektrumTimerInit(void)
+{
 
-  /* enable TIM6 clock */
-  rcc_periph_clock_enable(RCC_TIM6);
+  /* enable TIMx clock */
+  rcc_periph_clock_enable(RCC_TIMx);
 
-  /* TIM6 configuration, always counts up */
-  timer_set_mode(TIM6, TIM_CR1_CKD_CK_INT, 0, 0);
+  timer_reset(TIMx);
+  /* TIMx configuration, always counts up */
+  timer_set_mode(TIMx, TIM_CR1_CKD_CK_INT, TIM_CR1_CMS_EDGE, TIM_CR1_DIR_UP); // used to be 0 0
   /* 100 microseconds ie 0.1 millisecond */
-  timer_set_period(TIM6, TIM_TICS_FOR_100us-1);
-  uint32_t tim6_clk = timer_get_frequency(TIM6);
+  timer_set_period(TIMx, TIM_TICS_FOR_100us - 1);
+  uint32_t TIMx_clk = timer_get_frequency(TIMx);
   /* timer ticks with 1us */
-  timer_set_prescaler(TIM6, ((tim6_clk / ONE_MHZ) - 1));
+  timer_set_prescaler(TIMx, ((TIMx_clk / ONE_MHZ) - 1));
 
-  /* Enable TIM6 interrupts */
+  /* Enable TIMx interrupts */
 #ifdef STM32F1
-  nvic_set_priority(NVIC_TIM6_IRQ, NVIC_TIM6_IRQ_PRIO);
-  nvic_enable_irq(NVIC_TIM6_IRQ);
+  nvic_set_priority(NVIC_TIMx_IRQ, NVIC_TIMx_IRQ_PRIO);
+  nvic_enable_irq(NVIC_TIMx_IRQ);
 #elif defined STM32F4
-  /* the define says DAC IRQ, but it is also the global TIM6 IRQ*/
-  nvic_set_priority(NVIC_TIM6_DAC_IRQ, NVIC_TIM6_DAC_IRQ_PRIO);
-  nvic_enable_irq(NVIC_TIM6_DAC_IRQ);
+  /* the define says DAC IRQ, but it is also the global TIMx IRQ*/
+  nvic_set_priority(NVIC_TIMx_DAC_IRQ, NVIC_TIMx_DAC_IRQ_PRIO);
+  nvic_enable_irq(NVIC_TIMx_DAC_IRQ);
 #endif
 
-  /* Enable TIM6 Update interrupt */
-  timer_enable_irq(TIM6, TIM_DIER_UIE);
-  timer_clear_flag(TIM6, TIM_SR_UIF);
+  /* Enable TIMx Update interrupt */
+  timer_enable_irq(TIMx, TIM_DIER_UIE);
+  timer_clear_flag(TIMx, TIM_SR_UIF);
 
-  /* TIM6 enable counter */
-  timer_enable_counter(TIM6);
+  /* TIMx enable counter */
+  timer_enable_counter(TIMx);
 }
 
 /*****************************************************************************
  *
- * TIM6 interrupt request handler updates times used by SpektrumParser
+ * TIMx interrupt request handler updates times used by SpektrumParser
  *
  *****************************************************************************/
 #ifdef STM32F1
-void tim6_isr( void ) {
+void TIMx_ISR(void)
+{
 #elif defined STM32F4
-void tim6_dac_isr( void ) {
+void TIMx_DAC_ISR(void) {
 #endif
 
-  timer_clear_flag(TIM6, TIM_SR_UIF);
+  timer_clear_flag(TIMx, TIM_SR_UIF);
 
-  if (PrimarySpektrumState.SpektrumTimer)
+  if (PrimarySpektrumState.SpektrumTimer) {
     --PrimarySpektrumState.SpektrumTimer;
+  }
 #ifdef RADIO_CONTROL_SPEKTRUM_SECONDARY_PORT
-  if (SecondarySpektrumState.SpektrumTimer)
+  if (SecondarySpektrumState.SpektrumTimer) {
     --SecondarySpektrumState.SpektrumTimer;
+  }
 #endif
 }
 
@@ -566,7 +631,7 @@ void SpektrumUartInit(void) {
   gpio_setup_pin_af(PrimaryUart(_BANK), PrimaryUart(_PIN), PrimaryUart(_AF), FALSE);
 
   /* Configure Primary UART */
-  usart_set_baudrate(PrimaryUart(_DEV), 115200);
+  usart_set_baudrate(PrimaryUart(_DEV), B115200);
   usart_set_databits(PrimaryUart(_DEV), 8);
   usart_set_stopbits(PrimaryUart(_DEV), USART_STOPBITS_1);
   usart_set_parity(PrimaryUart(_DEV), USART_PARITY_NONE);
@@ -585,7 +650,7 @@ void SpektrumUartInit(void) {
   rcc_periph_clock_enable(SecondaryUart(_RCC));
 
   /* Enable USART interrupts */
-  nvic_set_priority(SecondaryUart(_IRQ), NVIC_PRIMARY_UART_PRIO+1);
+  nvic_set_priority(SecondaryUart(_IRQ), NVIC_PRIMARY_UART_PRIO + 1);
   nvic_enable_irq(SecondaryUart(_IRQ));
 
   /* Init GPIOS */;
@@ -593,7 +658,7 @@ void SpektrumUartInit(void) {
   gpio_setup_pin_af(SecondaryUart(_BANK), SecondaryUart(_PIN), SecondaryUart(_AF), FALSE);
 
   /* Configure secondary UART */
-  usart_set_baudrate(SecondaryUart(_DEV), 115200);
+  usart_set_baudrate(SecondaryUart(_DEV), B115200);
   usart_set_databits(SecondaryUart(_DEV), 8);
   usart_set_stopbits(SecondaryUart(_DEV), USART_STOPBITS_1);
   usart_set_parity(SecondaryUart(_DEV), USART_PARITY_NONE);
@@ -685,18 +750,33 @@ void SecondaryUart(_ISR)(void) {
  *
  *****************************************************************************/
 void radio_control_spektrum_try_bind(void) {
+#ifdef SPEKTRUM_BIND_PIN_PORT
+#ifdef SPEKTRUM_BIND_PIN_HIGH
+  /* Init GPIO for the bind pin, we enable the pulldown resistor.
+   * (esden) As far as I can tell only navstick is using the PIN LOW version of
+   * the bind pin, but I assume this should not harm anything. If I am mistaken
+   * than I appologise for the inconvenience. :)
+   */
+  gpio_setup_input_pulldown(SPEKTRUM_BIND_PIN_PORT, SPEKTRUM_BIND_PIN);
 
-  /* Init GPIO for the bind pin */
-  gpio_setup_input(SPEKTRUM_BIND_PIN_PORT, SPEKTRUM_BIND_PIN);
+  /* exit if the BIND_PIN is low, it needs to
+     be pulled high at startup to initiate bind */
+  if (gpio_get(SPEKTRUM_BIND_PIN_PORT, SPEKTRUM_BIND_PIN) == 0) {
+    return;
+  }
+#else
+  /* Init GPIO for the bind pin, we enable the pullup resistor in case we have
+   * a floating pin that does not have a hardware pullup resistor as it is the
+   * case with Lisa/M and Lisa/MX prior to version 2.1.
+   */
+  gpio_setup_input_pullup(SPEKTRUM_BIND_PIN_PORT, SPEKTRUM_BIND_PIN);
 
   /* exit if the BIND_PIN is high, it needs to
      be pulled low at startup to initiate bind */
-#ifdef SPEKTRUM_BIND_PIN_HIGH
-  if (gpio_get(SPEKTRUM_BIND_PIN_PORT, SPEKTRUM_BIND_PIN) == 0)
+  if (gpio_get(SPEKTRUM_BIND_PIN_PORT, SPEKTRUM_BIND_PIN) != 0) {
     return;
-#else
-  if (gpio_get(SPEKTRUM_BIND_PIN_PORT, SPEKTRUM_BIND_PIN) != 0)
-    return;
+  }
+#endif
 #endif
 
   /* Master receiver Rx push-pull */
@@ -717,8 +797,7 @@ void radio_control_spektrum_try_bind(void) {
      power up is. This works for the moment but will need revisiting */
   sys_time_usleep(61000);
 
-  for (int i = 0; i < MASTER_RECEIVER_PULSES ; i++)
-  {
+  for (int i = 0; i < MASTER_RECEIVER_PULSES ; i++) {
     gpio_clear(SPEKTRUM_PRIMARY_BIND_CONF_PORT, SPEKTRUM_PRIMARY_BIND_CONF_PIN);
     sys_time_usleep(118);
     gpio_set(SPEKTRUM_PRIMARY_BIND_CONF_PORT, SPEKTRUM_PRIMARY_BIND_CONF_PIN);
@@ -726,8 +805,7 @@ void radio_control_spektrum_try_bind(void) {
   }
 
 #ifdef RADIO_CONTROL_SPEKTRUM_SECONDARY_PORT
-  for (int i = 0; i < SLAVE_RECEIVER_PULSES; i++)
-  {
+  for (int i = 0; i < SLAVE_RECEIVER_PULSES; i++) {
     gpio_clear(SPEKTRUM_SECONDARY_BIND_CONF_PORT, SPEKTRUM_SECONDARY_BIND_CONF_PIN);
     sys_time_usleep(120);
     gpio_set(SPEKTRUM_SECONDARY_BIND_CONF_PORT, SPEKTRUM_SECONDARY_BIND_CONF_PIN);

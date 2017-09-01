@@ -23,33 +23,33 @@
 #include "mcu.h"
 #include "mcu_periph/sys_time.h"
 #include "mcu_periph/gpio.h"
-#include "interrupt_hw.h"
 
 #ifndef TEST_GPIO1
 #define TEST_GPIO1 GPIOB,GPIO17
 #endif
-PRINT_CONFIG_VAR(TEST_GPIO1)
 
 #ifndef TEST_GPIO2
 #define TEST_GPIO2 GPIOB,GPIO23
 #endif
-PRINT_CONFIG_VAR(TEST_GPIO2)
 
 
 /*
  * Called from the systime interrupt handler
  */
-static inline void main_periodic(uint8_t id __attribute__((unused))) {
+static inline void main_periodic(uint8_t id __attribute__((unused)))
+{
   gpio_toggle(TEST_GPIO1);
 }
 
 
-static inline void main_periodic_2(void) {
+static inline void main_periodic_2(void)
+{
   gpio_toggle(TEST_GPIO2);
 }
 
 
-int main(void) {
+int main(void)
+{
 
   // not calling mcu_init with PERIPHERALS_AUTO_INIT
   // rather explicitly init only sys_time
@@ -64,7 +64,7 @@ int main(void) {
 
   mcu_int_enable();
 
-  while(1) {
+  while (1) {
     if (sys_time_check_and_ack_timer(tmr_2)) {
       main_periodic_2();
     }

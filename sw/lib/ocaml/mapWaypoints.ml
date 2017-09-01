@@ -92,6 +92,7 @@ object (self)
       name <- n;
       label#set_name name
     end
+  method geomap = geomap
   method alt = alt
   method label = label
   method xy = let a = wpt_group#i2w_affine in (a.(4), a.(5))
@@ -154,7 +155,9 @@ object (self)
     ignore(minus10#connect#pressed (fun _ -> change_alt (-10.)));
     ignore(plus10#connect#pressed (fun _ -> change_alt (10.)));
 
+    (* called when ok button is clicked in WP Edit dialog *)
     let callback = fun _ ->
+      geomap#edit_georef_name name ename#text;
       self#set_name ename#text;
       alt <- ea#value;
       label#set_name name;
@@ -185,6 +188,7 @@ object (self)
       let delete_callback = fun () ->
         dialog#destroy ();
         self#delete ();
+        geomap#delete_georef name;
         updated ()
       in
       ignore(delete#connect#clicked ~callback:delete_callback)
@@ -254,7 +258,7 @@ object (self)
   method moved = moved <> None
   method reset_moved () =
     match moved with
-        None -> ()
+      | None -> ()
       | Some x ->
         Glib.Timeout.remove x;
         item#affine_absolute rotation_45;
@@ -277,15 +281,16 @@ object (self)
 
     let new_pos = ecef_distance current_ecef new_ecef > 2. in
     match moved, new_pos with
-        None, true ->
+      | None, _ ->
           self#move dx dy;
           alt <- alt+.dz;
           if update then updated ()
-      | (None, false) | (Some _, true) -> ()
+      | Some _, true -> ()
       | Some _, false -> self#reset_moved ()
   method set_ground_alt ga = ground_alt <- ga
   method delete () =
     deleted <- true; (* BOF *)
+    geomap#delete_georef name;
     wpt_group#destroy ()
   method zoom (z:float) =
     if List.length wpt_group#get_items > 0 then
